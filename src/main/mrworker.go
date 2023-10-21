@@ -10,20 +10,22 @@ package main
 // Please do not change this file.
 //
 
-import "luminouslabs-ds/mr"
-import "plugin"
-import "os"
-import "fmt"
-import "log"
+import (
+	"fmt"
+	"log"
+	"luminouslabs-ds/mr"
+	"os"
+	"plugin"
+)
 
 func main() {
 	if len(os.Args) != 2 {
 		fmt.Fprintf(os.Stderr, "Usage: mrworker xxx.so\n")
 		os.Exit(1)
 	}
-
+	//载入动态库wc.go,连接上具体可实现的Map和Reduce功能
 	mapf, reducef := loadPlugin(os.Args[1])
-
+	//Worker开始干活，自己手动模拟的话要在多个窗口启动多个mrworker.go
 	mr.Worker(mapf, reducef)
 }
 
