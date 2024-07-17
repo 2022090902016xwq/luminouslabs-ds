@@ -33,6 +33,7 @@ import (
 // tester) on the same server, via the applyCh passed to Make(). set
 // CommandValid to true to indicate that the ApplyMsg contains a newly
 // committed log entry.
+type State int
 type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
@@ -44,6 +45,19 @@ type ApplyMsg struct {
 	SnapshotTerm  int
 	SnapshotIndex int
 }
+
+// 日志条目
+type LogEntry struct {
+	Term    int         //任期
+	Command interface{} //命令
+}
+
+// 服务器状态
+const (
+	Leader State = iota
+	Candidate
+	Follower
+)
 
 // A Go object implementing a single Raft peer.
 type Raft struct {
@@ -57,6 +71,18 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
+	// persistent state on all servers
+	currentTerm int        //当前任期
+	votedFor    int        //投票给谁
+	log         []LogEntry //日志
+	// volatile state on all servers
+	commitIndex int
+	lsatApplied int
+	// volatile state on leaders
+	nextIndex  []int //要发送的下一日志的索引
+	matchIndex []int //日志匹配的日志索引
+	// 自己添加的变量
+	state State // 服务器状态
 }
 
 // return currentTerm and whether this server
@@ -121,12 +147,31 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // field names must start with capital letters!
 type RequestVoteArgs struct {
 	// Your data here.
+	term         int //candidate的任期
+	candidateId  int //candidate的编号
+	lastLogIndex int //最新日志条目的编号
+	lastLogTerm  int //最新日志条目的任期
 }
 
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
 	// Your data here.
+	term        int  //Voter的当前任期，candidate用此比对任期
+	voteGranted bool //true表示投票给发RPC的candidate
+}
+
+type AppendEntriesArgs struct {
+	term         int        //leader的任期
+	leaderId     int        //leader的编号
+	preLogIndex  int        //前一个条目的索引
+	preLogTerm   int        //前一个条目的任期
+	entries      []LogEntry //要存储的日志条目，空为心跳
+	leaderCommit int        //leader的commitIndex
+}
+type AppendEntriesReply struct {
+	term    int  //follower的当前任期
+	success bool //true表示follower包含匹配prevLogIndex和prevLogTerm的日志
 }
 
 // example RequestVote RPC handler.
