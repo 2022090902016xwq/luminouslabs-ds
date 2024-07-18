@@ -82,17 +82,20 @@ type Raft struct {
 	nextIndex  []int //要发送的下一日志的索引
 	matchIndex []int //日志匹配的日志索引
 	// 自己添加的变量
-	state State // 服务器状态
+	state     State         // 服务器状态
+	applyChan chan ApplyMsg //ApplyMsg通道，传递要apply到本地状态机的日志条目
 }
 
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
 	var term int
 	var isleader bool
 	// Your code here (2A).
-
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	term = rf.currentTerm
+	isleader = (rf.state == Leader)
 	return term, isleader
 }
 
@@ -157,10 +160,11 @@ type RequestVoteArgs struct {
 // field names must start with capital letters!
 type RequestVoteReply struct {
 	// Your data here.
-	term        int  //Voter的当前任期，candidate用此比对任期
+	term        int  //Voter的当前任期，candidate用此比对任期决定是否更新
 	voteGranted bool //true表示投票给发RPC的candidate
 }
 
+// AppendEntries RPC arguments structure
 type AppendEntriesArgs struct {
 	term         int        //leader的任期
 	leaderId     int        //leader的编号
@@ -169,13 +173,52 @@ type AppendEntriesArgs struct {
 	entries      []LogEntry //要存储的日志条目，空为心跳
 	leaderCommit int        //leader的commitIndex
 }
+
+// AppendEntries RPC arguments structure
 type AppendEntriesReply struct {
 	term    int  //follower的当前任期
 	success bool //true表示follower包含匹配prevLogIndex和prevLogTerm的日志
 }
 
-// example RequestVote RPC handler.
+// 比较candidate日志是否比voter更新，termC和indexC对应candidate最后一个日志条目的任期和索引
+func (rf *Raft) isCandidateLogUpToDate(termC, indexC int) bool {
+	//如果两个日志的最后一个条目的任期不同，那么任期大的更新；
+	//如果两个日志的最后一个条目的任期相同，日志更长的更新。
+	indexRf := len(rf.log) - 1     // rf最后一个日志条目的索引
+	termRf := rf.log[indexRf].Term // rf最后一个日志条目的任期
+	return (termC > termRf) || (termC == termRf && indexC > indexRf)
+}
+
+// example RequestVote RPC handler. follower检查信息并向candidate向投票
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	reply.term = rf.currentTerm
+	//Reply false if term < currentTerm
+	if args.term < rf.currentTerm {
+		reply.voteGranted = false
+		return
+	}
+	//任期检查,比较voter和candidate的任期
+	//candidate任期大则voter一定追随它,重置rf任期、状态、投票
+	if args.term > rf.currentTerm {
+		rf.currentTerm = args.term
+		rf.state = Follower
+		rf.votedFor = -1
+	}
+	//If votedFor is null or candidateId, and candidate’s log is at
+	//least as up-to-date as receiver’s log, grant vote
+	if (rf.votedFor == -1 || rf.votedFor == args.candidateId) && rf.isCandidateLogUpToDate(args.lastLogTerm, args.lastLogIndex) {
+		rf.state = Follower
+		rf.votedFor = args.candidateId
+		reply.voteGranted = true
+	} else {
+		reply.voteGranted = false
+		return
+	}
+}
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	// Your code here.
 }
 
@@ -282,7 +325,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here.
-
+	rf.state = Follower
+	rf.votedFor = -1
+	rf.currentTerm = 0
+	rf.commitIndex = 0
+	rf.lsatApplied = 0
+	rf.applyChan = applyCh
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
