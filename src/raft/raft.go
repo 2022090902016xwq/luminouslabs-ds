@@ -46,7 +46,7 @@ type ApplyMsg struct {
 	SnapshotIndex int
 }
 
-// 日志条目
+// LogEntry 日志条目
 type LogEntry struct {
 	Term    int         //任期
 	Command interface{} //命令
@@ -79,11 +79,13 @@ type Raft struct {
 	commitIndex int
 	lsatApplied int
 	// volatile state on leaders
-	nextIndex  []int //要发送的下一日志的索引
+	nextIndex  []int //要发送的下一条目的索引
 	matchIndex []int //日志匹配的日志索引
 	// 自己添加的变量
-	state     State         // 服务器状态
-	applyChan chan ApplyMsg //ApplyMsg通道，传递要apply到本地状态机的日志条目
+	state      State         // 服务器状态
+	applyChan  chan ApplyMsg //ApplyMsg通道，传递要apply到本地状态机的日志条目
+	votesNum   int           //candidate阶段票数统计
+	resetTimer time.Time     //上次投票时间
 }
 
 // return currentTerm and whether this server
@@ -150,28 +152,28 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // field names must start with capital letters!
 type RequestVoteArgs struct {
 	// Your data here.
-	term         int //candidate的任期
-	candidateId  int //candidate的编号
-	lastLogIndex int //最新日志条目的编号
-	lastLogTerm  int //最新日志条目的任期
+	Term         int //candidate的任期
+	CandidateId  int //candidate的编号
+	LastLogIndex int //最新日志条目的编号
+	LastLogTerm  int //最新日志条目的任期
 }
 
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
 	// Your data here.
-	term        int  //Voter的当前任期，candidate用此比对任期决定是否更新
-	voteGranted bool //true表示投票给发RPC的candidate
+	Term        int  //Voter的当前任期，candidate用此比对任期决定是否更新
+	VoteGranted bool //true表示投票给发RPC的candidate
 }
 
 // AppendEntries RPC arguments structure
 type AppendEntriesArgs struct {
-	term         int        //leader的任期
-	leaderId     int        //leader的编号
-	preLogIndex  int        //前一个条目的索引
-	preLogTerm   int        //前一个条目的任期
-	entries      []LogEntry //要存储的日志条目，空为心跳
-	leaderCommit int        //leader的commitIndex
+	Term         int        //leader的任期
+	LeaderId     int        //leader的编号
+	PreLogIndex  int        //前一个条目的索引
+	PreLogTerm   int        //前一个条目的任期
+	Entries      []LogEntry //要存储的日志条目，空为心跳
+	LeaderCommit int        //leader的commitIndex
 }
 
 // AppendEntries RPC arguments structure
@@ -181,12 +183,16 @@ type AppendEntriesReply struct {
 }
 
 // 比较candidate日志是否比voter更新，termC和indexC对应candidate最后一个日志条目的任期和索引
-func (rf *Raft) isCandidateLogUpToDate(termC, indexC int) bool {
+func (rf *Raft) isLogUpToDate(termC, indexC int) bool {
 	//如果两个日志的最后一个条目的任期不同，那么任期大的更新；
 	//如果两个日志的最后一个条目的任期相同，日志更长的更新。
-	indexRf := len(rf.log) - 1     // rf最后一个日志条目的索引
-	termRf := rf.log[indexRf].Term // rf最后一个日志条目的任期
-	return (termC > termRf) || (termC == termRf && indexC > indexRf)
+	indexRf := len(rf.log) - 1 // rf最后一个日志条目的索引
+	var termRf int
+	termRf = rf.getLastTerm()
+	//fmt.Println("func isLogUpToDate check termC > termRf:", termC > termRf)
+	//fmt.Println("func isLogUpToDate check termC == termRf:", termC == termRf)
+	//fmt.Println("func isLogUpToDate check indexC > indexRf:", indexC > indexRf)
+	return (termC > termRf) || (termC == termRf && indexC >= indexRf)
 }
 
 // example RequestVote RPC handler. follower检查信息并向candidate向投票
@@ -194,29 +200,33 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	reply.term = rf.currentTerm
+	reply.Term = rf.currentTerm
 	//Reply false if term < currentTerm
-	if args.term < rf.currentTerm {
-		reply.voteGranted = false
+	if args.Term < rf.currentTerm {
+		reply.VoteGranted = false
 		return
 	}
 	//任期检查,比较voter和candidate的任期
 	//candidate任期大则voter一定追随它,重置rf任期、状态、投票
-	if args.term > rf.currentTerm {
-		rf.currentTerm = args.term
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
 		rf.state = Follower
 		rf.votedFor = -1
 	}
 	//If votedFor is null or candidateId, and candidate’s log is at
 	//least as up-to-date as receiver’s log, grant vote
-	if (rf.votedFor == -1 || rf.votedFor == args.candidateId) && rf.isCandidateLogUpToDate(args.lastLogTerm, args.lastLogIndex) {
+	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && rf.isLogUpToDate(args.LastLogTerm, args.LastLogIndex) {
 		rf.state = Follower
-		rf.votedFor = args.candidateId
-		reply.voteGranted = true
+		rf.votedFor = args.CandidateId
+		reply.VoteGranted = true
+		rf.persist()
+		//fmt.Println("func RequestVote", rf.me, " votedFor", rf.votedFor)
 	} else {
-		reply.voteGranted = false
+		//fmt.Println("func RequestVote", rf.me, " votedFor", rf.votedFor)
+		reply.VoteGranted = false
 		return
 	}
+
 }
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	// Your code here.
@@ -250,7 +260,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+	//fmt.Println("func sendRequestVote", rf.me)
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	return ok
+}
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
 }
 
@@ -300,12 +315,84 @@ func (rf *Raft) ticker() {
 
 		// Your code here
 		// Check if a leader election should be started.
-
+		//要设置随机的election timeout，超时就开始选举
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
 		ms := 50 + (rand.Int63() % 300)
+		electionTimeout := time.Duration(ms) * time.Millisecond
 		time.Sleep(time.Duration(ms) * time.Millisecond)
+		rf.mu.Lock()
+		if rf.state != Leader {
+			if time.Now().Sub(rf.resetTimer) > electionTimeout {
+				rf.startElection()
+			}
+		} else {
+			rf.heartbeats()
+		}
+		rf.mu.Unlock()
 	}
+}
+
+func (rf *Raft) startElection() {
+	//fmt.Println("func startElection", rf.me)
+	rf.currentTerm++
+	rf.state = Candidate //转变状态
+	rf.votesNum = 1      //为自己投票
+	args := &RequestVoteArgs{
+		Term:         rf.currentTerm,
+		CandidateId:  rf.me,
+		LastLogIndex: rf.getLastIndex(),
+		LastLogTerm:  rf.getLastTerm(),
+	}
+
+	for i := range rf.peers {
+		if i == rf.me {
+			continue
+		}
+		//向其他服务器发送
+		go func(server int) {
+			reply := &RequestVoteReply{}
+			if rf.sendRequestVote(server, args, reply) {
+				//比对任期,发现更高任期则重置
+				if rf.currentTerm < reply.Term {
+					rf.currentTerm = reply.Term
+					rf.state = Follower
+					rf.votedFor = -1
+					rf.persist()
+					return
+				}
+				//检查投票
+				if reply.VoteGranted {
+					rf.votesNum++
+					if rf.state == Candidate && rf.votesNum > (len(rf.peers)-1)/2 {
+						rf.state = Leader
+						rf.votesNum = 0
+						rf.votedFor = -1
+						rf.persist()
+					}
+				}
+			}
+		}(i)
+
+	}
+}
+
+func (rf *Raft) getLastIndex() int {
+	if len(rf.log) > 0 {
+		return len(rf.log) - 1
+	}
+	return 0
+}
+
+func (rf *Raft) getLastTerm() int {
+	if len(rf.log) > 0 {
+		return rf.log[len(rf.log)-1].Term
+	}
+	return 0
+}
+
+func (rf *Raft) heartbeats() {
+
 }
 
 // the service or tester wants to create a Raft server. the ports
@@ -325,6 +412,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here.
+	rf.log = make([]LogEntry, 0)
 	rf.state = Follower
 	rf.votedFor = -1
 	rf.currentTerm = 0
