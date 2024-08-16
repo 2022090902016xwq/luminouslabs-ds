@@ -103,6 +103,7 @@ func (rf *Raft) GetState() (int, bool) {
 	defer rf.mu.Unlock()
 	term = rf.currentTerm
 	isleader = (rf.state == Leader)
+	Debug(dInfo, "S%d, T%d, isLeader %v", rf.me, term, isleader)
 	return term, isleader
 }
 
@@ -194,6 +195,7 @@ func (rf *Raft) ticker() {
 		case <-rf.electionTimer.C:
 			//选举超时，转变身份，开始选举,重启定时器
 			rf.mu.Lock()
+			//Debug(dTimer, "S%d ElectionTimeout ", rf.me)
 			rf.state = Candidate
 			rf.currentTerm += 1
 			Debug(dTerm, "S%d Converting to Candidate , calling election T:%d", rf.me, rf.currentTerm)
@@ -203,12 +205,11 @@ func (rf *Raft) ticker() {
 		case <-rf.heartbeatTimer.C:
 			rf.mu.Lock()
 			if rf.state == Leader {
-				rf.mu.Lock()
+				Debug(dLeader, "S%d Sending Heartbeat", rf.me)
 				rf.broadcastHeartbeat(true)
 				rf.heartbeatTimer.Reset(StableHeartbeatTimeout())
-				rf.mu.Unlock()
 			}
-
+			rf.mu.Unlock()
 		}
 
 	}
@@ -216,8 +217,8 @@ func (rf *Raft) ticker() {
 
 // 开始选举
 func (rf *Raft) startElection() {
-
 	//为自己投票，准备args，发送并处理RPC请求
+	Debug(dVote, "S%d starts election, T%d", rf.me, rf.currentTerm)
 	votesNum := 1
 	rf.votedFor = rf.me
 	args := rf.genRequestVoteArgs()
@@ -231,7 +232,7 @@ func (rf *Raft) startElection() {
 			if res { //处理返回结果
 				//检查任期、状态
 				if rf.currentTerm < reply.Term {
-					Debug(dTerm, "S%d Update (T:%d->%d), S%d:T is higher, ", rf.me, server, rf.currentTerm, reply.Term)
+					Debug(dTerm, "S%d Updates (T:%d->%d) and becomes Follower, S%d:T is higher, ", rf.me, server, rf.currentTerm, reply.Term)
 					rf.currentTerm = reply.Term
 					rf.state = Follower
 					rf.votedFor = -1
@@ -241,13 +242,15 @@ func (rf *Raft) startElection() {
 				//检查投票情况
 				if reply.VoteGranted {
 					votesNum++
-					Debug(dVote, "S%d Get vote(S%d)", rf.me, server)
+					Debug(dVote, "S%d Got vote from S%d", rf.me, server)
 					if rf.state == Candidate && votesNum > (len(rf.servers)-1)/2 {
 						rf.state = Leader
 						rf.votedFor = -1
-						Debug(dLeader, "S%d Achieved Majority for T%d(%d), converting to Leader", rf.me, rf.currentTerm, votesNum)
+						rf.electionTimer.Stop()
+						Debug(dLeader, "S%d Achieved Majority for T%d(votes %d), converting to Leader", rf.me, rf.currentTerm, votesNum)
 						//开始履行leader任务，重置心跳定时器，发个心跳看看实力
 						rf.heartbeatTimer.Reset(StableHeartbeatTimeout())
+						rf.broadcastHeartbeat(true)
 					}
 				}
 			}
@@ -265,14 +268,18 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	reply.Term = rf.currentTerm
 	//Reply false if term < currentTerm
 	if args.Term < rf.currentTerm {
+		Debug(dVote, "S%d Rejects vote request from S%d due to outdated term", rf.me, args.CandidateId)
 		reply.VoteGranted = false
 		return
 	}
 	//Server follows the Candidate(Term larger)
 	if args.Term > rf.currentTerm {
+		Debug(dTerm, "S%d Updates term(%d -> %d)", rf.me, rf.currentTerm, args.Term)
 		rf.currentTerm = args.Term
 		rf.state = Follower
 		rf.votedFor = -1
@@ -287,6 +294,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		Debug(dVote, "S%d Grant vote to S%d", rf.me, args.CandidateId)
 		//rf.persist()
 	} else {
+		Debug(dVote, "S%d rejects vote request from S%d for votedFor||LogUptoDate", rf.me, args.CandidateId)
 		reply.VoteGranted = false
 		return
 	}
@@ -300,6 +308,7 @@ func (rf *Raft) broadcastHeartbeat(isHeartBeat bool) {
 		}
 		if isHeartBeat {
 			// need sending at once to maintain leadership
+			Debug(dLeader, "S%d sends heartbeat to S%d", rf.me, server)
 			go rf.replicateOneRound(server)
 		} else {
 			//just signal replicator goroutine to send entries in batch(client)
@@ -316,7 +325,7 @@ func (rf *Raft) replicateOneRound(server int) {
 		rf.mu.RUnlock()
 		return
 	}
-	Debug(dLeader, "S%d Replicate logs to S%d", rf.me, server)
+	Debug(dLeader, "S%d replicates logs to S%d", rf.me, server)
 	// prepare AppendEntries args
 	args := rf.genAppendEntriesArgs(server)
 	rf.mu.RUnlock()
@@ -337,6 +346,7 @@ func (rf *Raft) genAppendEntriesArgs(server int) *AppendEntriesArgs {
 		PrevLogTerm:  rf.log[rf.nextIndex[server]-1].Term,
 		LeaderCommit: rf.commitIndex,
 	}
+	Debug(dLog, "S%d AE-Args to S%d LeaderCommit%d", rf.me, server, args.LeaderCommit)
 	if rf.getLastIndex() >= rf.nextIndex[server] {
 		entries := make([]LogEntry, 0)
 		entries = append(entries, rf.log[rf.nextIndex[server]:]...) //解引用
@@ -345,31 +355,37 @@ func (rf *Raft) genAppendEntriesArgs(server int) *AppendEntriesArgs {
 		args.Entries = []LogEntry{}
 	}
 	//Debug(dLeader, "S%d Make AE-Args to S%d", rf.me, server)
-	//Debug(dInfo, "S%d AE-Args to S%d: ", rf.me, server, *args)
+	//Debug(dInfo, "S%d AE-Args to S%d-", rf.me, server, *args)
 	return args
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	//Debug(dLog, "S%d send AE to S%d", rf.me, server)
+	Debug(dLog, "S%d send AE to S%d", rf.me, server)
 	ok := rf.servers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
 }
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	//Term check: Reply false if term < currentTerm (§5.1), heartbeat not available
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if args.Term < rf.currentTerm {
 		reply.Success = false
 		reply.Term = rf.currentTerm
 		reply.ConflictIndex = -1
 		reply.ConflictTerm = 0
+		Debug(dLog, "S%d rejects AE from S%d due to outdated term", rf.me, args.LeaderId)
 		return
 	}
 	//HeartBeat response: corrective Term , reset status and timer
 	rf.currentTerm = args.Term
 	rf.state = Follower
-	RandomizedElectionTimeout()
+	Debug(dLog, "S%d accepts AE from S%d", rf.me, args.LeaderId)
+	Debug(dLog, "S%d leaderCommit%d vs followerCommit%d", rf.me, args.LeaderCommit, rf.commitIndex)
+	rf.electionTimer.Reset(RandomizedElectionTimeout())
 	//Logs match and conflict: Reply false and conflict information if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
 	if !rf.matchLog(rf.me, args.PrevLogIndex, args.PrevLogTerm) {
 		reply.Success = false
+		Debug(dLog, "S%d detects log conflict from S%d", rf.me, args.LeaderId)
 		if rf.getLastIndex() < args.PrevLogIndex { //log shorter conflict
 			reply.ConflictTerm = -1
 			reply.ConflictIndex = rf.getLastIndex()
@@ -387,11 +403,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//Append any new entries not already in the log
 	if len(args.Entries) > 0 {
 		rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
+		Debug(dLog, "S%d appends new entries from S%d", rf.me, args.LeaderId)
+		Debug(dInfo, "S%d log-", rf.me, rf.log)
 	}
 	//set commitIndex and then signal applyCond
 	rf.followerCommitLog(args.LeaderCommit)
 	//reply update
 	reply.Success, reply.Term = true, rf.currentTerm
+	Debug(dInfo, "S%d AE-Reply to S%d-", rf.me, args.LeaderId, *reply)
 }
 
 // check entry at prevLogIndex whose term matches prevLogTerm
@@ -413,6 +432,7 @@ func (rf *Raft) followerCommitLog(leaderCommit int) {
 	}
 	if rf.lsatApplied < rf.commitIndex {
 		rf.applyCond.Signal()
+		Debug(dApply, "S%d signal applyCond", rf.me)
 	}
 }
 func (rf *Raft) handleAppendEntriesReply(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -420,17 +440,20 @@ func (rf *Raft) handleAppendEntriesReply(server int, args *AppendEntriesArgs, re
 	if rf.state == Leader && rf.currentTerm == args.Term {
 		//check reply.success
 		if reply.Success { //log match, update nextIndex and matchIndex
+			Debug(dLog, "S%d matches log from S%d", rf.me, server)
 			rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
 			rf.nextIndex[server] = rf.matchIndex[server] + 1
-			rf.leaderCommitLog()
+			rf.leaderCommitApplyLog()
 		} else { //conflict
 			//term conflict
 			if reply.Term > rf.currentTerm {
+				Debug(dTerm, "S%d Term outDate ,change status to Follower", rf.me)
 				rf.state = Follower
 				rf.electionTimer.Reset(RandomizedElectionTimeout())
 				rf.currentTerm, rf.votedFor = reply.Term, -1
 			} else if reply.Term == rf.currentTerm {
 				if reply.ConflictTerm != -1 { //log conflict
+					Debug(dLog, "S%d log conflict with S%d", rf.me, server)
 					rf.nextIndex[server] = reply.ConflictIndex
 					//search ConflictTerm
 					for i := args.PrevLogIndex; i > 0; i-- {
@@ -446,7 +469,7 @@ func (rf *Raft) handleAppendEntriesReply(server int, args *AppendEntriesArgs, re
 	}
 }
 
-func (rf *Raft) leaderCommitLog() {
+func (rf *Raft) leaderCommitApplyLog() {
 	//copy and sort matchIndex
 	sortedMatchIndex := make([]int, len(rf.matchIndex))
 	copy(sortedMatchIndex, rf.matchIndex)
@@ -456,6 +479,11 @@ func (rf *Raft) leaderCommitLog() {
 	//check N,N > commitIndex, and log[N].term == currentTerm:set commitIndex = N
 	if N > rf.commitIndex && rf.log[N].Term == rf.currentTerm {
 		rf.commitIndex = N
+		Debug(dCommit, "S%d commits up to index %d", rf.me, rf.commitIndex)
+	}
+	if rf.lsatApplied < rf.commitIndex {
+		rf.applyCond.Signal()
+		Debug(dApply, "S%d(leader) signal applyCond", rf.me)
 	}
 }
 
@@ -467,20 +495,24 @@ func (rf *Raft) applier() {
 		for rf.commitIndex <= rf.lsatApplied {
 			rf.applyCond.Wait()
 		}
+		Debug(dApply, "S%d-Ready to apply logs. commitIndex=%d, lastApplied=%d", rf.me, rf.commitIndex, rf.lsatApplied)
 		//if commitindex > lsatApplied, apply log[lsatApplied+1:commitIndex]
 		commitIndex, lsatApplied := rf.commitIndex, rf.lsatApplied
-		entries := make([]LogEntry, lsatApplied-commitIndex)
+		entries := make([]LogEntry, commitIndex-lsatApplied)
 		copy(entries, rf.log[lsatApplied+1:commitIndex+1])
+		Debug(dApply, "S%d-Applying logs from index %d to %d", rf.me, lsatApplied+1, commitIndex)
 		rf.mu.Unlock()
 		for _, entry := range entries {
 			rf.applyChan <- ApplyMsg{
 				Command:      entry.Command,
-				CommandIndex: rf.lsatApplied + 1,
+				CommandIndex: lsatApplied + 1,
 				CommandValid: true,
 			}
+			lsatApplied++
 		}
 		rf.mu.Lock()
 		rf.lsatApplied = max(lsatApplied, commitIndex)
+		Debug(dApply, "S%d-Updated lastApplied to %d", rf.me, rf.lsatApplied)
 		rf.mu.Unlock()
 	}
 }
@@ -522,7 +554,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			Term:    term,
 			Command: command,
 		}
+		//leader append , others need to update like matchIndex for itself
 		rf.log = append(rf.log, newEntry)
+		rf.matchIndex[rf.me] = rf.getLastIndex()
+		Debug(dClient, "S%d-Append new entry to log-%v", rf.me, newEntry)
 		//启动复制
 		rf.broadcastHeartbeat(false)
 	}

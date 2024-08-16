@@ -27,6 +27,7 @@ func StableHeartbeatTimeout() time.Duration {
 func RandomizedElectionTimeout() time.Duration {
 	return time.Duration(ElectionTimeout+rand.Intn(ElectionTimeout)) * time.Millisecond
 }
+
 func (rf *Raft) genRequestVoteArgs() RequestVoteArgs {
 	return RequestVoteArgs{
 		Term:         rf.currentTerm,
