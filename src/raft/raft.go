@@ -20,6 +20,9 @@ package raft
 import (
 	//	"bytes"
 
+	"bytes"
+	"fmt"
+	"luminouslabs-ds/labgob"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -117,12 +120,14 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	// Your code here (拓展：持久化).
 	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// raftstate := w.Bytes()
-	// rf.persister.Save(raftstate, nil)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, nil)
+	Debug(dPersist, "S%d, T%d, votedFor:%d, persist", rf.me, rf.currentTerm, rf.votedFor)
 }
 
 // restore previously persisted state.
@@ -132,17 +137,21 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	// Your code here (拓展：持久化).
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var votedFor int
+	var log []LogEntry
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&votedFor) != nil ||
+		d.Decode(&log) != nil {
+		fmt.Println("decode error")
+	} else {
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.log = log
+	}
+	Debug(dPersist, "S%d, T%d, votedFor:%d, readPersist", rf.me, rf.currentTerm, rf.votedFor)
 }
 
 // the service says it has created a snapshot that has
@@ -220,6 +229,7 @@ func (rf *Raft) startElection() {
 	Debug(dVote, "S%d starts election, T%d", rf.me, rf.currentTerm)
 	votesNum := 1
 	rf.votedFor = rf.me
+	rf.persist()
 	args := rf.genRequestVoteArgs()
 	for i := 0; i < len(rf.servers); i++ {
 		if i == rf.me {
@@ -235,7 +245,7 @@ func (rf *Raft) startElection() {
 					rf.currentTerm = reply.Term
 					rf.votedFor = -1
 					rf.changeState(Follower)
-					// rf.persist()
+					rf.persist()
 					return
 				}
 				//检查投票情况
@@ -266,6 +276,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 	reply.Term = rf.currentTerm
 	//Reply false if term < currentTerm
 	if args.Term < rf.currentTerm {
@@ -364,6 +375,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//Term check: Reply false if term < currentTerm (§5.1), heartbeat not available
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 	if args.Term < rf.currentTerm {
 		reply.Success = false
 		reply.Term = rf.currentTerm
@@ -450,6 +462,7 @@ func (rf *Raft) handleAppendEntriesReply(server int, args *AppendEntriesArgs, re
 				Debug(dTerm, "S%d Term outDate ,change status to Follower", rf.me)
 				rf.changeState(Follower)
 				rf.currentTerm, rf.votedFor = reply.Term, -1
+				rf.persist()
 			} else if reply.Term == rf.currentTerm {
 				if reply.ConflictTerm != -1 { //log conflict for index and term
 					Debug(dLog2, "S%d leader finds log conflict with S%d", rf.me, server)
@@ -554,14 +567,16 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		isLeader = false
 		return index, term, isLeader
 	} else {
+		//prepare new log entry
 		index = rf.getLastIndex() + 1
 		term = rf.currentTerm
 		newEntry := LogEntry{
 			Term:    term,
 			Command: command,
 		}
-		//leader append , others need to update like matchIndex for itself
+		//leader append , persist log, and update matchIndex for itself
 		rf.log = append(rf.log, newEntry)
+		rf.persist()
 		rf.matchIndex[rf.me] = rf.getLastIndex()
 		Debug(dClient, "S%d-Append new entry to log-%v", rf.me, newEntry)
 		//启动复制

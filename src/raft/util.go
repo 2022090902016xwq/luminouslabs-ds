@@ -25,6 +25,7 @@ func StableHeartbeatTimeout() time.Duration {
 
 }
 func RandomizedElectionTimeout() time.Duration {
+	//Debug(dTimer,"ElectionTimeout")
 	return time.Duration(ElectionTimeout+rand.Intn(ElectionTimeout)) * time.Millisecond
 }
 
@@ -62,6 +63,7 @@ func (rf *Raft) changeState(toState State) {
 		rf.heartbeatTimer.Reset(StableHeartbeatTimeout())
 	case Follower:
 		rf.state = Follower
+		Debug(dTimer, "S%d RandomizedElectionTimeout", rf.me)
 		rf.electionTimer.Reset(RandomizedElectionTimeout())
 	case Candidate:
 		rf.state = Candidate
