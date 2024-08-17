@@ -9,7 +9,7 @@ import (
 )
 
 // debug option
-var debug int = 0
+var debug int = 1
 
 // topic of log
 type logTopic string

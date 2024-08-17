@@ -51,3 +51,20 @@ func (rf *Raft) isLogUpToDate(termC, indexC int) bool {
 	termRf := rf.getLastTerm()
 	return (termC > termRf) || (termC == termRf && indexC >= indexRf)
 }
+
+// 封装状态转换的操作，改变身份为Follower用的比较多
+func (rf *Raft) changeState(toState State) {
+	switch toState {
+	case Leader:
+		rf.state = Leader
+		rf.votedFor = -1
+		rf.electionTimer.Stop()
+		rf.heartbeatTimer.Reset(StableHeartbeatTimeout())
+	case Follower:
+		rf.state = Follower
+		rf.electionTimer.Reset(RandomizedElectionTimeout())
+	case Candidate:
+		rf.state = Candidate
+		rf.currentTerm += 1
+	}
+}

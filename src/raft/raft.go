@@ -193,11 +193,10 @@ func (rf *Raft) ticker() {
 	for rf.killed() == false {
 		select {
 		case <-rf.electionTimer.C:
-			//选举超时，转变身份，开始选举,重启定时器
+			//选举超时，转变身份，任期++，开始选举,重启定时器
 			rf.mu.Lock()
 			//Debug(dTimer, "S%d ElectionTimeout ", rf.me)
-			rf.state = Candidate
-			rf.currentTerm += 1
+			rf.changeState(Candidate)
 			Debug(dTerm, "S%d Converting to Candidate , calling election T:%d", rf.me, rf.currentTerm)
 			rf.startElection()
 			rf.electionTimer.Reset(RandomizedElectionTimeout())
@@ -232,10 +231,10 @@ func (rf *Raft) startElection() {
 			if res { //处理返回结果
 				//检查任期、状态
 				if rf.currentTerm < reply.Term {
-					Debug(dTerm, "S%d Updates (T:%d->%d) and becomes Follower, S%d:T is higher, ", rf.me, server, rf.currentTerm, reply.Term)
+					Debug(dTerm, "S%d Updates (T:%d->%d) and becomes Follower, S%d:T is higher, ", rf.me, rf.currentTerm, reply.Term, server, reply.Term)
 					rf.currentTerm = reply.Term
-					rf.state = Follower
 					rf.votedFor = -1
+					rf.changeState(Follower)
 					// rf.persist()
 					return
 				}
@@ -244,12 +243,9 @@ func (rf *Raft) startElection() {
 					votesNum++
 					Debug(dVote, "S%d Got vote from S%d", rf.me, server)
 					if rf.state == Candidate && votesNum > (len(rf.servers)-1)/2 {
-						rf.state = Leader
-						rf.votedFor = -1
-						rf.electionTimer.Stop()
 						Debug(dLeader, "S%d Achieved Majority for T%d(votes %d), converting to Leader", rf.me, rf.currentTerm, votesNum)
-						//开始履行leader任务，重置心跳定时器，发个心跳看看实力
-						rf.heartbeatTimer.Reset(StableHeartbeatTimeout())
+						//成为Leader，关停选举超时定时器，重置心跳定时器，发个心跳看看实力
+						rf.changeState(Leader)
 						rf.broadcastHeartbeat(true)
 					}
 				}
@@ -280,21 +276,21 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//Server follows the Candidate(Term larger)
 	if args.Term > rf.currentTerm {
 		Debug(dTerm, "S%d Updates term(%d -> %d)", rf.me, rf.currentTerm, args.Term)
+		rf.changeState(Follower)
 		rf.currentTerm = args.Term
-		rf.state = Follower
-		rf.votedFor = -1
+		rf.votedFor = args.CandidateId
 	}
 	//If votedFor is null or candidateId, and candidate’s log is at
 	//least as up-to-date as receiver’s log, grant vote
 	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && rf.isLogUpToDate(args.LastLogTerm, args.LastLogIndex) {
-		rf.state = Follower
+		rf.changeState(Follower)
 		rf.votedFor = args.CandidateId
-		rf.electionTimer.Reset(RandomizedElectionTimeout())
 		reply.VoteGranted = true
 		Debug(dVote, "S%d Grant vote to S%d", rf.me, args.CandidateId)
 		//rf.persist()
 	} else {
 		Debug(dVote, "S%d rejects vote request from S%d for votedFor||LogUptoDate", rf.me, args.CandidateId)
+		Debug(dInfo, "S%d votedFor:%d, args.CandidateId:%d", rf.me, rf.votedFor, args.CandidateId)
 		reply.VoteGranted = false
 		return
 	}
@@ -378,15 +374,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	//HeartBeat response: corrective Term , reset status and timer
 	rf.currentTerm = args.Term
-	rf.state = Follower
+	rf.changeState(Follower)
 	Debug(dLog, "S%d accepts AE from S%d", rf.me, args.LeaderId)
 	Debug(dLog, "S%d leaderCommit%d vs followerCommit%d", rf.me, args.LeaderCommit, rf.commitIndex)
-	rf.electionTimer.Reset(RandomizedElectionTimeout())
 	//Logs match and conflict: Reply false and conflict information if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
 	if !rf.matchLog(rf.me, args.PrevLogIndex, args.PrevLogTerm) {
-		reply.Success = false
+		reply.Success, reply.Term = false, rf.currentTerm
 		Debug(dLog, "S%d detects log conflict from S%d", rf.me, args.LeaderId)
 		if rf.getLastIndex() < args.PrevLogIndex { //log shorter conflict
+			Debug(dLog, "S%d Log conflict from S%d for log length", rf.me, args.LeaderId)
 			reply.ConflictTerm = -1
 			reply.ConflictIndex = rf.getLastIndex()
 		} else { //log entry conflict, find conflict information
@@ -397,6 +393,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				i--
 			}
 			reply.ConflictIndex = i
+			Debug(dLog, "S%d Log conflict from S%d for log entry", rf.me, args.LeaderId)
+			Debug(dInfo, "S%d ConflictIndex:%d ConflictTerm%d", rf.me, reply.ConflictIndex, reply.ConflictTerm)
 		}
 		return
 	}
@@ -404,13 +402,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if len(args.Entries) > 0 {
 		rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
 		Debug(dLog, "S%d appends new entries from S%d", rf.me, args.LeaderId)
-		Debug(dInfo, "S%d log-", rf.me, rf.log)
+		//Debug(dInfo, "S%d log-", rf.me, rf.log)
 	}
 	//set commitIndex and then signal applyCond
 	rf.followerCommitLog(args.LeaderCommit)
-	//reply update
+	//reply update, no conflict so just reply success and term
 	reply.Success, reply.Term = true, rf.currentTerm
-	Debug(dInfo, "S%d AE-Reply to S%d-", rf.me, args.LeaderId, *reply)
+	//Debug(dInfo, "S%d AE-Reply to S%d-", rf.me, args.LeaderId, *reply)
 }
 
 // check entry at prevLogIndex whose term matches prevLogTerm
@@ -445,15 +443,17 @@ func (rf *Raft) handleAppendEntriesReply(server int, args *AppendEntriesArgs, re
 			rf.nextIndex[server] = rf.matchIndex[server] + 1
 			rf.leaderCommitApplyLog()
 		} else { //conflict
+			Debug(dLog, "S%d leader finds log conflict from S%d", rf.me, server)
+			Debug(dInfo, "S%d leader currentTerm:%d, S%d reply.Term:%d", rf.me, rf.currentTerm, server, reply.Term)
 			//term conflict
 			if reply.Term > rf.currentTerm {
 				Debug(dTerm, "S%d Term outDate ,change status to Follower", rf.me)
-				rf.state = Follower
-				rf.electionTimer.Reset(RandomizedElectionTimeout())
+				rf.changeState(Follower)
 				rf.currentTerm, rf.votedFor = reply.Term, -1
 			} else if reply.Term == rf.currentTerm {
-				if reply.ConflictTerm != -1 { //log conflict
-					Debug(dLog, "S%d log conflict with S%d", rf.me, server)
+				if reply.ConflictTerm != -1 { //log conflict for index and term
+					Debug(dLog2, "S%d leader finds log conflict with S%d", rf.me, server)
+					Debug(dLog2, "S%d leader finds ConflictIndex:%d, ConflictTerm:%d, nextIndex[%d]:%d", rf.me, reply.ConflictIndex, reply.ConflictTerm, server, rf.nextIndex[server])
 					rf.nextIndex[server] = reply.ConflictIndex
 					//search ConflictTerm
 					for i := args.PrevLogIndex; i > 0; i-- {
@@ -462,6 +462,10 @@ func (rf *Raft) handleAppendEntriesReply(server int, args *AppendEntriesArgs, re
 							break
 						}
 					}
+					Debug(dLog2, "S%d after search, nextIndex[%d]: %d ", rf.me, server, rf.nextIndex[server])
+				} else { //log conflict for log length
+					Debug(dLog2, "S%d leader find log conflict with S%d for log length", rf.me, server)
+					rf.nextIndex[server] = reply.ConflictIndex
 				}
 			}
 
@@ -544,6 +548,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (拓展：日志复制).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if rf.state != Leader {
 		isLeader = false
 		return index, term, isLeader
