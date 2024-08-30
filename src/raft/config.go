@@ -182,6 +182,7 @@ func (cfg *config) applier(i int, applyCh chan ApplyMsg) {
 // returns "" or error string
 func (cfg *config) ingestSnap(i int, snapshot []byte, index int) string {
 	if snapshot == nil {
+		Debug(dTest, "S8 error nil snapshot")
 		log.Fatalf("nil snapshot")
 		return "nil snapshot"
 	}
@@ -221,6 +222,7 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 		err_msg := ""
 		if m.SnapshotValid {
 			cfg.mu.Lock()
+			//Debug(dTest, "S8 error applierSnap")
 			err_msg = cfg.ingestSnap(i, m.Snapshot, m.SnapshotIndex)
 			cfg.mu.Unlock()
 		} else if m.CommandValid {
