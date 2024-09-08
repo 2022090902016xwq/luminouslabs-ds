@@ -238,7 +238,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		return
 	}
 	//heartbeat
-	rf.votedFor = -1
+	//rf.votedFor = -1
 	rf.changeState(Follower)
 	//trim log and set args
 	index := args.LastIncludedIndex
@@ -332,7 +332,6 @@ func (rf *Raft) ticker() {
 			rf.changeState(Candidate)
 			Debug(dTerm, "S%d Converting to Candidate , calling election T:%d", rf.me, rf.currentTerm)
 			rf.startElection()
-			rf.electionTimer.Reset(RandomizedElectionTimeout())
 			rf.mu.Unlock()
 		case <-rf.heartbeatTimer.C:
 			rf.mu.Lock()
@@ -365,7 +364,7 @@ func (rf *Raft) startElection() {
 			if res { //处理返回结果
 				//检查任期、状态
 				if rf.currentTerm < reply.Term {
-					Debug(dTerm, "S%d Updates (T:%d->%d) and becomes Follower, S%d:T is higher, ", rf.me, rf.currentTerm, reply.Term, server, reply.Term)
+					Debug(dTerm, "S%d Updates (T:%d->%d) and becomes Follower, S%d:T%d is higher", rf.me, rf.currentTerm, reply.Term, server, reply.Term)
 					rf.currentTerm = reply.Term
 					rf.votedFor = -1
 					rf.changeState(Follower)
@@ -433,6 +432,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 // 心跳维持领导力
 func (rf *Raft) broadcastHeartbeat(isHeartBeat bool) {
+	if rf.state != Leader {
+		return
+	}
 	for server := range rf.servers {
 		if server == rf.me {
 			continue
@@ -527,8 +529,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 	//HeartBeat response: corrective Term , reset status and timer
-	rf.currentTerm = args.Term
 	rf.changeState(Follower)
+	rf.currentTerm = args.Term
 	Debug(dLog, "S%d accepts AE from S%d", rf.me, args.LeaderId)
 	Debug(dLog, "S%d leaderCommit%d vs followerCommit%d", rf.me, args.LeaderCommit, rf.commitIndex)
 	//Logs match and conflict: Reply false and conflict information if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
@@ -554,7 +556,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			reply.ConflictTerm = rf.getTerm(args.PrevLogIndex)
 			//search ConflictIndex
 			i := args.PrevLogIndex
-			for i > rf.lastIncludeIndex && rf.getTerm(i) == reply.ConflictTerm {
+			for i > rf.lastIncludeIndex+1 && rf.getTerm(i) == reply.ConflictTerm {
 				i--
 			}
 			reply.ConflictIndex = i
@@ -628,8 +630,8 @@ func (rf *Raft) handleAppendEntriesReply(server int, args *AppendEntriesArgs, re
 						rf.me, reply.ConflictIndex, reply.ConflictTerm, server, rf.nextIndex[server])
 					rf.nextIndex[server] = reply.ConflictIndex
 					//search ConflictTerm
-					for i := args.PrevLogIndex - rf.lastIncludeIndex; i > 0; i-- {
-						if rf.log[i].Term == reply.ConflictTerm {
+					for i := args.PrevLogIndex; i > rf.lastIncludeIndex; i-- {
+						if rf.getTerm(i) == reply.ConflictTerm {
 							rf.nextIndex[server] = i + 1
 							break
 						}
@@ -639,8 +641,9 @@ func (rf *Raft) handleAppendEntriesReply(server int, args *AppendEntriesArgs, re
 					rf.nextIndex[server] = reply.ConflictIndex
 					Debug(dLog2, "S%d leader find log conflict with S%d for log length, rf.nextIndex[%d]:%d", rf.me, server, server, rf.nextIndex[server])
 				}
+				//日志冲突，立即发送一轮AppendEntries来同步日志;会不会和心跳冲突呢
+				//rf.replicateOneRound(server)
 			}
-
 		}
 	}
 }
@@ -798,7 +801,7 @@ func Make(servers []*labrpc.ClientEnd, me int,
 		replicatorCond: make([]*sync.Cond, len(servers)),
 		applyChan:      applyCh,
 	}
-
+	Debug(dInfo, "S%d Make successful", rf.me)
 	// Your initialization code here.
 	rf.applyCond = sync.NewCond(&rf.mu)
 	for i := 0; i < len(servers); i++ {

@@ -16,7 +16,7 @@ import (
 //	}
 
 const (
-	HeartbeatTimeout = 60
+	HeartbeatTimeout = 50
 	ElectionTimeout  = 150
 )
 
@@ -25,8 +25,9 @@ func StableHeartbeatTimeout() time.Duration {
 
 }
 func RandomizedElectionTimeout() time.Duration {
-	//Debug(dTimer,"ElectionTimeout")
-	return time.Duration(ElectionTimeout+rand.Intn(ElectionTimeout)) * time.Millisecond
+	t := ElectionTimeout + rand.Intn(ElectionTimeout/2)
+	Debug(dTimer, "RandomizedElectionTimeout t:%v", t)
+	return time.Duration(t) * time.Millisecond
 }
 
 func (rf *Raft) genRequestVoteArgs() RequestVoteArgs {
@@ -53,7 +54,6 @@ func (rf *Raft) changeState(toState State) {
 	case Leader:
 		rf.electionTimer.Stop()
 		rf.state = Leader
-		rf.votedFor = -1
 		for i := 0; i < len(rf.servers); i++ {
 			rf.nextIndex[i] = rf.getLastIndex() + 1
 		}
