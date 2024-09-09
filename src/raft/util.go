@@ -16,8 +16,8 @@ import (
 //	}
 
 const (
-	HeartbeatTimeout = 50
-	ElectionTimeout  = 150
+	HeartbeatTimeout = 70
+	ElectionTimeout  = 300
 )
 
 func StableHeartbeatTimeout() time.Duration {
@@ -25,8 +25,8 @@ func StableHeartbeatTimeout() time.Duration {
 
 }
 func RandomizedElectionTimeout() time.Duration {
-	t := ElectionTimeout + rand.Intn(ElectionTimeout/2)
-	Debug(dTimer, "RandomizedElectionTimeout t:%v", t)
+	t := ElectionTimeout + rand.Intn(ElectionTimeout)
+	//Debug(dTimer, "RandomizedElectionTimeout t:%v", t)
 	return time.Duration(t) * time.Millisecond
 }
 
@@ -54,7 +54,7 @@ func (rf *Raft) changeState(toState State) {
 	case Leader:
 		rf.electionTimer.Stop()
 		rf.state = Leader
-		for i := 0; i < len(rf.servers); i++ {
+		for i := 0; i < len(rf.peers); i++ {
 			rf.nextIndex[i] = rf.getLastIndex() + 1
 		}
 		rf.heartbeatTimer.Reset(StableHeartbeatTimeout())
@@ -65,6 +65,7 @@ func (rf *Raft) changeState(toState State) {
 	case Candidate:
 		rf.state = Candidate
 		rf.currentTerm += 1
+		rf.electionTimer.Reset(RandomizedElectionTimeout())
 	}
 }
 func (rf *Raft) getTerm(curIndex int) int {
