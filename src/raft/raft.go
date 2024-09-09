@@ -334,8 +334,6 @@ func (rf *Raft) ticker() {
 		case <-rf.electionTimer.C:
 			//选举超时，转变身份，任期++，开始选举,重启定时器
 			rf.mu.Lock()
-			//Debug(dTimer, "S%d ElectionTimeout ", rf.me)
-			rf.changeState(Candidate)
 			Debug(dTerm, "S%d Converting to Candidate , calling election T:%d", rf.me, rf.currentTerm)
 			rf.startElection()
 			rf.mu.Unlock()
@@ -354,7 +352,8 @@ func (rf *Raft) ticker() {
 
 // 开始选举
 func (rf *Raft) startElection() {
-	//为自己投票，准备args，发送并处理RPC请求
+	rf.changeState(Candidate)
+	//为自己投票，准备args，并行发送和处理RPC请求
 	Debug(dVote, "S%d starts election, T%d", rf.me, rf.currentTerm)
 	votesNum := 1
 	rf.votedFor = rf.me
@@ -416,9 +415,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//Server follows the Candidate(Term larger)
 	if args.Term > rf.currentTerm {
 		Debug(dTerm, "S%d Updates term(%d -> %d)", rf.me, rf.currentTerm, args.Term)
+		//发现更大Term时只要重置follower身份，防止有更新日志的节点无法顺利发起选举
 		rf.changeState(Follower)
 		rf.currentTerm = args.Term
-		rf.votedFor = args.CandidateId
+		rf.votedFor = -1
 	}
 	//If votedFor is null or candidateId, and candidate’s log is at
 	//least as up-to-date as receiver’s log, grant vote
@@ -427,7 +427,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
 		Debug(dVote, "S%d Grant vote to S%d", rf.me, args.CandidateId)
-		rf.persist()
 	} else {
 		Debug(dVote, "S%d rejects vote request from S%d for votedFor||LogUptoDate", rf.me, args.CandidateId)
 		Debug(dInfo, "S%d votedFor:%d, args.CandidateId:%d", rf.me, rf.votedFor, args.CandidateId)
@@ -533,28 +532,26 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//HeartBeat response: corrective Term , reset status and timer
 	rf.changeState(Follower)
 	rf.currentTerm = args.Term
-	Debug(dLog, "S%d accepts AE from S%d", rf.me, args.LeaderId)
-	Debug(dLog, "S%d leaderCommit%d vs followerCommit%d", rf.me, args.LeaderCommit, rf.commitIndex)
-	//Logs match and conflict: Reply false and conflict information if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
-	Debug(dTerm, "S%d AE args.PrevLogIndex:%d, rf.lastIncludeIndex:%d", rf.me, args.PrevLogIndex, rf.lastIncludeIndex)
+	Debug(dLog, "S%d accepts AE from S%d, leaderCommit%d vs followerCommit%d, args.PrevLogIndex:%d, rf.lastIncludeIndex:%d",
+		rf.me, args.LeaderId, args.LeaderCommit, rf.commitIndex, args.PrevLogIndex, rf.lastIncludeIndex)
 	//快照和日志的冲突
 	if args.PrevLogIndex < rf.lastIncludeIndex {
 		reply.Term, reply.Success = rf.currentTerm, false
 		reply.ConflictIndex = rf.lastIncludeIndex + 1
 		reply.ConflictTerm = -1
-		Debug(dSnap, "S%d receives unexpected AppendEntriesRequest from S%d because prevLogIndex %d < firstLogIndex %d", rf.me, args.LeaderId, args.PrevLogIndex, rf.getFirstLogIndex())
+		Debug(dSnap, "S%d AE: need snapshot from S%d: prevLogIndex %d < lastIncludeIndex %d", rf.me, args.LeaderId, args.PrevLogIndex, rf.lastIncludeIndex)
 		return
 	}
+	//Logs match and conflict: Reply false and conflict information if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
 	if !rf.matchLog(rf.me, args.PrevLogIndex, args.PrevLogTerm) {
+		Debug(dLog, "S%d AE: log conflict from S%d", rf.me, args.LeaderId)
 		reply.Success, reply.Term = false, rf.currentTerm
-		Debug(dLog, "S%d detects log conflict from S%d", rf.me, args.LeaderId)
 
 		if rf.getLastIndex() < args.PrevLogIndex { //log shorter conflict
-			Debug(dLog, "S%d Log conflict from S%d for log length", rf.me, args.LeaderId)
+			Debug(dLog, "S%d AE: Log conflict from S%d for log length", rf.me, args.LeaderId)
 			reply.ConflictTerm = -1
 			reply.ConflictIndex = rf.getLastIndex() + 1
 		} else { //log entry conflict, find conflict information
-			Debug(dLog, "S%d AE else", rf.me)
 			reply.ConflictTerm = rf.getTerm(args.PrevLogIndex)
 			//search ConflictIndex
 			i := args.PrevLogIndex
@@ -562,8 +559,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				i--
 			}
 			reply.ConflictIndex = i
-			Debug(dLog, "S%d Log conflict from S%d for log entry", rf.me, args.LeaderId)
-			Debug(dInfo, "S%d ConflictIndex:%d ConflictTerm%d", rf.me, reply.ConflictIndex, reply.ConflictTerm)
+			Debug(dLog, "S%d Log conflict from S%d for log entry, ConflictIndex:%d ConflictTerm%d",
+				rf.me, args.LeaderId, reply.ConflictIndex, reply.ConflictTerm)
 		}
 		return
 	}
@@ -588,17 +585,18 @@ func (rf *Raft) matchLog(server, prevLogIndex, PrevLogTerm int) bool {
 	}
 	//check term of log with prevLogIndex
 	if rf.getTerm(prevLogIndex) != PrevLogTerm {
-		Debug(dLog, "S%d !matchLog rf.getTerm(prevLogIndex):%d, PrevLogTerm:%d", rf.me, rf.getTerm(prevLogIndex), PrevLogTerm)
+		Debug(dLog, "S%d !matchLog from %d rf.getTerm(prevLogIndex):%d, PrevLogTerm:%d", rf.me, server, rf.getTerm(prevLogIndex), PrevLogTerm)
 		return false
 	}
 	return true
 }
 
 func (rf *Raft) followerCommitLog(leaderCommit int) {
-	Debug(dSnap, "S%d followerCommitLog:%d, leaderCommit:%d, rf.getLastIndex():%d, rf.lastApplied:%d",
+	Debug(dInfo, "S%d followerCommitLog:%d, leaderCommit:%d, rf.getLastIndex():%d, rf.lastApplied:%d",
 		rf.me, rf.commitIndex, leaderCommit, rf.getLastIndex(), rf.lastApplied)
 	if leaderCommit > rf.commitIndex {
 		rf.commitIndex = min(leaderCommit, rf.getLastIndex())
+		Debug(dInfo, "S%d followerCommitLog: commitIndex:%d", rf.me, rf.commitIndex)
 	}
 	if rf.lastApplied < rf.commitIndex {
 		rf.applyCond.Signal()
@@ -612,26 +610,24 @@ func (rf *Raft) handleAppendEntriesReply(server int, args *AppendEntriesArgs, re
 	if rf.state == Leader && rf.currentTerm == args.Term {
 		//check reply.success
 		if reply.Success { //log match, update nextIndex and matchIndex
-			Debug(dLog, "S%d matches log from S%d", rf.me, server)
 			rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
 			rf.nextIndex[server] = rf.matchIndex[server] + 1
-			Debug(dLog2, "S%d nextIndex[%d]:%d, matchIndex[%d]:%d, args.PrevLogIndex:%d, len(args.Entries):%d",
-				rf.me, server, rf.nextIndex[server], server, rf.matchIndex[server], args.PrevLogIndex, len(args.Entries))
+			Debug(dLog2, "S%d matches log from S%d, nextIndex[%d]:%d, matchIndex[%d]:%d, args.PrevLogIndex:%d, len(args.Entries):%d",
+				rf.me, server, server, rf.nextIndex[server], server, rf.matchIndex[server], args.PrevLogIndex, len(args.Entries))
 			rf.leaderCommitApplyLog()
 		} else { //conflict
 			Debug(dLog, "S%d leader finds log conflict from S%d", rf.me, server)
 			Debug(dInfo, "S%d leader currentTerm:%d, S%d reply.Term:%d", rf.me, rf.currentTerm, server, reply.Term)
 			//term conflict
 			if reply.Term > rf.currentTerm {
-				Debug(dTerm, "S%d Term outDate ,change status to Follower", rf.me)
+				Debug(dTerm, "S%d HAE: Term outDate ,change status to Follower", rf.me)
 				rf.changeState(Follower)
 				rf.currentTerm, rf.votedFor = reply.Term, -1
 				rf.persist()
 			} else if reply.Term == rf.currentTerm {
 				if reply.ConflictTerm != -1 { //log conflict for index and term
-					Debug(dLog2, "S%d leader finds log conflict with S%d", rf.me, server)
-					Debug(dLog2, "S%d leader finds ConflictIndex:%d, ConflictTerm:%d, nextIndex[%d]:%d",
-						rf.me, reply.ConflictIndex, reply.ConflictTerm, server, rf.nextIndex[server])
+					Debug(dLog2, "S%d leader finds log conflict with S%d, ConflictIndex:%d, ConflictTerm:%d, nextIndex[%d]:%d",
+						rf.me, server, reply.ConflictIndex, reply.ConflictTerm, server, rf.nextIndex[server])
 					rf.nextIndex[server] = reply.ConflictIndex
 					//search ConflictTerm
 					for i := args.PrevLogIndex; i > rf.lastIncludeIndex; i-- {
@@ -645,8 +641,8 @@ func (rf *Raft) handleAppendEntriesReply(server int, args *AppendEntriesArgs, re
 					rf.nextIndex[server] = reply.ConflictIndex
 					Debug(dLog2, "S%d leader find log conflict with S%d for log length, rf.nextIndex[%d]:%d", rf.me, server, server, rf.nextIndex[server])
 				}
-				//日志冲突，立即发送一轮AppendEntries来同步日志;会不会和心跳冲突呢
-				//rf.replicateOneRound(server)
+				//日志冲突，立即发送一轮AppendEntries来同步日志;会不会和心跳冲突呢;有所问题
+				go rf.replicateOneRound(server)
 			}
 		}
 	}

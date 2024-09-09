@@ -57,6 +57,7 @@ func (rf *Raft) changeState(toState State) {
 		for i := 0; i < len(rf.peers); i++ {
 			rf.nextIndex[i] = rf.getLastIndex() + 1
 		}
+		rf.electionTimer.Stop()
 		rf.heartbeatTimer.Reset(StableHeartbeatTimeout())
 	case Follower:
 		rf.state = Follower
@@ -74,7 +75,6 @@ func (rf *Raft) getTerm(curIndex int) int {
 	if curIndex-rf.lastIncludeIndex == 0 {
 		return rf.lastIncludeTerm
 	}
-	//fmt.Printf("[GET] curIndex:%v,rf.lastIncludeIndex:%v\n", curIndex, rf.lastIncludeIndex)
 	return rf.log[curIndex-rf.lastIncludeIndex].Term
 }
 
@@ -101,10 +101,6 @@ func (rf *Raft) getLastTerm() int {
 	} else {
 		return rf.log[len(rf.log)-1].Term
 	}
-}
-
-func (rf *Raft) getFirstLogIndex() int {
-	return rf.lastIncludeIndex + 1
 }
 
 // 将日志修剪，保存index之后的条目
