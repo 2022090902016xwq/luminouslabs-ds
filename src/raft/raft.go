@@ -335,7 +335,9 @@ func (rf *Raft) ticker() {
 			//选举超时，转变身份，任期++，开始选举,重启定时器
 			rf.mu.Lock()
 			Debug(dTerm, "S%d Converting to Candidate , calling election T:%d", rf.me, rf.currentTerm)
+			rf.changeState(Candidate)
 			rf.startElection()
+			rf.electionTimer.Reset(RandomizedElectionTimeout())
 			rf.mu.Unlock()
 		case <-rf.heartbeatTimer.C:
 			rf.mu.Lock()
@@ -352,7 +354,6 @@ func (rf *Raft) ticker() {
 
 // 开始选举
 func (rf *Raft) startElection() {
-	rf.changeState(Candidate)
 	//为自己投票，准备args，并行发送和处理RPC请求
 	Debug(dVote, "S%d starts election, T%d", rf.me, rf.currentTerm)
 	votesNum := 1

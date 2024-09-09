@@ -66,7 +66,6 @@ func (rf *Raft) changeState(toState State) {
 	case Candidate:
 		rf.state = Candidate
 		rf.currentTerm += 1
-		rf.electionTimer.Reset(RandomizedElectionTimeout())
 	}
 }
 func (rf *Raft) getTerm(curIndex int) int {
