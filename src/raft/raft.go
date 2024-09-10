@@ -334,10 +334,10 @@ func (rf *Raft) ticker() {
 		case <-rf.electionTimer.C:
 			//选举超时，转变身份，任期++，开始选举,重启定时器
 			rf.mu.Lock()
-			Debug(dTerm, "S%d Converting to Candidate , calling election T:%d", rf.me, rf.currentTerm)
+			Debug(dTerm, "S%d Converting to Candidate , calling election T:%d", rf.me, rf.currentTerm+1)
 			rf.changeState(Candidate)
 			rf.startElection()
-			rf.electionTimer.Reset(RandomizedElectionTimeout())
+			rf.electionTimer.Reset(RandomizedElectionTimeout()) //保证和其他节点的超时时间相近
 			rf.mu.Unlock()
 		case <-rf.heartbeatTimer.C:
 			rf.mu.Lock()
@@ -368,6 +368,8 @@ func (rf *Raft) startElection() {
 			reply := RequestVoteReply{}
 			res := rf.sendRequestVote(server, &args, &reply)
 			if res { //处理返回结果
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
 				//检查任期、状态
 				if rf.currentTerm < reply.Term {
 					Debug(dTerm, "S%d Updates (T:%d->%d) and becomes Follower, S%d:T%d is higher", rf.me, rf.currentTerm, reply.Term, server, reply.Term)
@@ -631,7 +633,7 @@ func (rf *Raft) handleAppendEntriesReply(server int, args *AppendEntriesArgs, re
 						rf.me, server, reply.ConflictIndex, reply.ConflictTerm, server, rf.nextIndex[server])
 					rf.nextIndex[server] = reply.ConflictIndex
 					//search ConflictTerm
-					for i := args.PrevLogIndex; i > rf.lastIncludeIndex; i-- {
+					for i := args.PrevLogIndex; i > reply.ConflictIndex; i-- {
 						if rf.getTerm(i) == reply.ConflictTerm {
 							rf.nextIndex[server] = i + 1
 							break

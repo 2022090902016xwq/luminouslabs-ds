@@ -55,7 +55,10 @@ func (rf *Raft) changeState(toState State) {
 		rf.electionTimer.Stop()
 		rf.state = Leader
 		for i := 0; i < len(rf.peers); i++ {
-			rf.nextIndex[i] = rf.getLastIndex() + 1
+			if i != rf.me {
+				rf.nextIndex[i] = rf.getLastIndex() + 1
+				rf.matchIndex[i] = 0 //leader不知道和follower的日志从哪里开始匹配，防commmit越界！
+			}
 		}
 		rf.electionTimer.Stop()
 		rf.heartbeatTimer.Reset(StableHeartbeatTimeout())
