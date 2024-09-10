@@ -334,13 +334,13 @@ func (rf *Raft) ticker() {
 		case <-rf.electionTimer.C:
 			//选举超时，转变身份，任期++，开始选举,重启定时器
 			rf.mu.Lock()
-			Debug(dTerm, "S%d Converting to Candidate , calling election T:%d", rf.me, rf.currentTerm+1)
 			rf.changeState(Candidate)
 			rf.startElection()
 			rf.electionTimer.Reset(RandomizedElectionTimeout()) //保证和其他节点的超时时间相近
 			rf.mu.Unlock()
 		case <-rf.heartbeatTimer.C:
 			rf.mu.Lock()
+			Debug(dTimer, "S%d ticker: heartbeat part", rf.me)
 			if rf.state == Leader {
 				Debug(dLeader, "S%d Sending Heartbeat", rf.me)
 				rf.broadcastHeartbeat(true)
