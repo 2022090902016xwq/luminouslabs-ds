@@ -17,7 +17,7 @@ import (
 
 const (
 	HeartbeatTimeout = 70
-	ElectionTimeout  = 300
+	ElectionTimeout  = 500
 )
 
 func StableHeartbeatTimeout() time.Duration {
@@ -61,6 +61,9 @@ func (rf *Raft) changeState(toState State) {
 			}
 		}
 		rf.electionTimer.Stop()
+		//if !rf.electionTimer.Stop() {
+		//	<-rf.electionTimer.C
+		//}
 		rf.heartbeatTimer.Reset(StableHeartbeatTimeout())
 	case Follower:
 		rf.state = Follower
@@ -72,7 +75,10 @@ func (rf *Raft) changeState(toState State) {
 	}
 }
 func (rf *Raft) getTerm(curIndex int) int {
-	Debug(dTerm, "S%d getTerm curIndex:%d, rf.lastIncludeIndex:%d", rf.me, curIndex, rf.lastIncludeIndex)
+	if curIndex < rf.lastIncludeIndex {
+		Debug(dTerm, "S%d getTerm curIndex:%d, rf.lastIncludeIndex:%d", rf.me, curIndex, rf.lastIncludeIndex)
+		panic("curIndex < rf.lastIncludeIndex")
+	}
 	// 如果当前index与快照一致/日志为空，直接返回快照/快照初始化信息，否则根据快照计算
 	if curIndex-rf.lastIncludeIndex == 0 {
 		return rf.lastIncludeTerm
