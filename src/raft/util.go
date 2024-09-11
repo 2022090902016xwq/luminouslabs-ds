@@ -24,10 +24,22 @@ func StableHeartbeatTimeout() time.Duration {
 	return time.Duration(HeartbeatTimeout) * time.Millisecond
 
 }
-func RandomizedElectionTimeout() time.Duration {
+func (rf *Raft) RandomizedElectionTimeout() time.Duration {
 	t := ElectionTimeout + rand.Intn(ElectionTimeout)
-	//Debug(dTimer, "RandomizedElectionTimeout t:%v", t)
+	Debug(dTimer, "S%d RandomizedElectionTimeout t:%v", rf.me, t)
 	return time.Duration(t) * time.Millisecond
+}
+
+func (rf *Raft) ResetElectionTimer() {
+	//通知ticker正在重置，放弃超时行为
+	rf.electionTimer.Reset(rf.RandomizedElectionTimeout())
+	Debug(dTimer, "S%d RET Successful!", rf.me)
+}
+
+// 缩短选举定时器的方法
+func (rf *Raft) reduceElectionTimeout() {
+	rf.electionTimer.Reset(rf.RandomizedElectionTimeout() / 2)
+	Debug(dTimer, "S%d reduceElectionTimeout", rf.me)
 }
 
 func (rf *Raft) genRequestVoteArgs() RequestVoteArgs {
@@ -42,7 +54,7 @@ func (rf *Raft) genRequestVoteArgs() RequestVoteArgs {
 // 比较candidate日志是否比voter更新，termC和indexC对应candidate最后一个日志条目的任期和索引
 // 如果两个日志的最后一个条目的任期不同，那么任期大的更新；
 // 如果两个日志的最后一个条目的任期相同，日志更长的更新。
-func (rf *Raft) isLogUpToDate(termC, indexC int) bool {
+func (rf *Raft) isCandidateLogUpToDate(termC, indexC int) bool {
 	indexRf := rf.getLastIndex() // rf最后一个日志条目的索引
 	termRf := rf.getLastTerm()
 	return (termC > termRf) || (termC == termRf && indexC >= indexRf)
@@ -61,14 +73,10 @@ func (rf *Raft) changeState(toState State) {
 			}
 		}
 		rf.electionTimer.Stop()
-		//if !rf.electionTimer.Stop() {
-		//	<-rf.electionTimer.C
-		//}
 		rf.heartbeatTimer.Reset(StableHeartbeatTimeout())
 	case Follower:
 		rf.state = Follower
-		Debug(dTimer, "S%d RandomizedElectionTimeout", rf.me)
-		rf.electionTimer.Reset(RandomizedElectionTimeout())
+		rf.ResetElectionTimer()
 	case Candidate:
 		rf.state = Candidate
 		rf.currentTerm += 1
@@ -126,8 +134,7 @@ func (rf *Raft) shrinkLog(index int) {
 		rf.lastIncludeTerm = rf.getTerm(index)
 	}
 
-	Debug(dSnap, "S%d shrinkLog, rf.getLog(index):%v", rf.me, rf.getLog(index))
 	rf.lastIncludeIndex = index
 	rf.log = slog
-	Debug(dSnap, "S%d shrinkLog,rf.lastIncludeTerm:%d", rf.me, rf.lastIncludeTerm)
+	Debug(dSnap, "S%d shrinkLog,rf.lastIncludeTerm:%d,rf.getLog(index):%v", rf.me, rf.lastIncludeTerm, rf.getLog(index))
 }

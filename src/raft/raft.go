@@ -333,14 +333,14 @@ func (rf *Raft) ticker() {
 		select {
 		case <-rf.electionTimer.C:
 			//选举超时，转变身份，任期++，开始选举,重启定时器
+			Debug(dTimer, "S%d electionTimer out", rf.me)
 			rf.mu.Lock()
 			rf.changeState(Candidate)
 			rf.startElection()
-			rf.electionTimer.Reset(RandomizedElectionTimeout()) //保证和其他节点的超时时间相近
+			rf.ResetElectionTimer() //保证和其他节点的超时时间相近
 			rf.mu.Unlock()
 		case <-rf.heartbeatTimer.C:
 			rf.mu.Lock()
-			Debug(dTimer, "S%d ticker: heartbeat part", rf.me)
 			if rf.state == Leader {
 				Debug(dLeader, "S%d Sending Heartbeat", rf.me)
 				rf.broadcastHeartbeat(true)
@@ -365,6 +365,13 @@ func (rf *Raft) startElection() {
 			continue
 		}
 		go func(server int) {
+			//不是candidate就不发RV
+			rf.mu.RLock()
+			if rf.state != Candidate {
+				rf.mu.RUnlock()
+				return
+			}
+			rf.mu.RUnlock()
 			reply := RequestVoteReply{}
 			res := rf.sendRequestVote(server, &args, &reply)
 			if res { //处理返回结果
@@ -425,7 +432,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	//If votedFor is null or candidateId, and candidate’s log is at
 	//least as up-to-date as receiver’s log, grant vote
-	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && rf.isLogUpToDate(args.LastLogTerm, args.LastLogIndex) {
+	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && rf.isCandidateLogUpToDate(args.LastLogTerm, args.LastLogIndex) {
 		rf.changeState(Follower)
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
@@ -433,6 +440,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	} else {
 		Debug(dVote, "S%d rejects vote request from S%d for votedFor||LogUptoDate", rf.me, args.CandidateId)
 		Debug(dInfo, "S%d votedFor:%d, args.CandidateId:%d", rf.me, rf.votedFor, args.CandidateId)
+		//如果voter日志更新，它应该更快上台
+		if !rf.isCandidateLogUpToDate(args.LastLogTerm, args.LastLogIndex) {
+			rf.reduceElectionTimeout()
+		}
 		reply.VoteGranted = false
 		return
 	}
@@ -801,10 +812,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		matchIndex:  make([]int, len(peers)),
 
 		heartbeatTimer: time.NewTimer(StableHeartbeatTimeout()),
-		electionTimer:  time.NewTimer(RandomizedElectionTimeout()),
+
 		replicatorCond: make([]*sync.Cond, len(peers)),
 		applyChan:      applyCh,
 	}
+	rf.electionTimer = time.NewTimer(rf.RandomizedElectionTimeout())
 	Debug(dInfo, "S%d Make successful", rf.me)
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
