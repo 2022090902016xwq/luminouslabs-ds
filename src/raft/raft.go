@@ -192,9 +192,17 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.shrinkLog(index)
 	rf.commitIndex = rf.lastIncludeIndex
 	rf.lastApplied = rf.lastIncludeIndex
+	Debug(dLog, "S%d before persist rf.persister.RaftStateSize():%v rf.persister.ReadRaftState:%v", rf.me, rf.persister.RaftStateSize(), rf.persister.ReadRaftState())
 	//Debug(dTrace, "S%d snapshot:%v", rf.me, snapshot)
 	//persist
 	rf.persister.Save(rf.persistData(), snapshot)
+	Debug(dLog, "S%d after persist rf.persister.RaftStateSize():%v rf.persister.ReadRaftState:%v", rf.me, rf.persister.RaftStateSize(), rf.persister.ReadRaftState())
+	for i := 0; i < len(rf.peers); i++ {
+		if i == rf.me {
+			continue
+		}
+		go rf.replicateOneRound(i)
+	}
 }
 
 type InstallSnapshotArgs struct {

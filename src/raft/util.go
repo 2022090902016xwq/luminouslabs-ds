@@ -82,6 +82,12 @@ func (rf *Raft) changeState(toState State) {
 		rf.currentTerm += 1
 	}
 }
+func (rf *Raft) GetLastIncludeIndex() int {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.lastIncludeIndex
+}
+
 func (rf *Raft) getTerm(curIndex int) int {
 	if curIndex < rf.lastIncludeIndex {
 		Debug(dTerm, "S%d getTerm curIndex:%d, rf.lastIncludeIndex:%d", rf.me, curIndex, rf.lastIncludeIndex)
